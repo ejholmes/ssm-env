@@ -15,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/ec2metadata"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ssm"
+	log "github.com/sirupsen/logrus"
 )
 
 const (
@@ -26,6 +27,12 @@ const (
 	// The SSM API limits this to a maximum of 10 at the time of writing.
 	defaultBatchSize = 10
 )
+
+func init() {
+	log.SetFormatter(&log.JSONFormatter{})
+	log.SetOutput(os.Stdout)
+	log.SetLevel(log.WarnLevel)
+}
 
 // TemplateFuncs are helper functions provided to the template.
 var TemplateFuncs = template.FuncMap{
@@ -49,6 +56,7 @@ func main() {
 		template = flag.String("template", DefaultTemplate, "The template used to determine what the SSM parameter name is for an environment variable. When this template returns an empty string, the env variable is not an SSM parameter")
 		decrypt  = flag.Bool("with-decryption", false, "Will attempt to decrypt the parameter, and set the env var as plaintext")
 		nofail  = flag.Bool("no-fail", false, "Don't fail if error retrieving parameter")
+		debug = flag.Bool("debug", false, "Enable debug logs")
 	)
 	flag.Parse()
 	args := flag.Args()
@@ -65,19 +73,27 @@ func main() {
 
 	t, err := parseTemplate(*template)
 	must(err)
+	if *debug {
+		log.SetLevel(log.DebugLevel)
+	}
 	e := &expander{
 		batchSize: defaultBatchSize,
 		t:         t,
-		ssm:       ssm.New(session.Must(awsSession())),
+		ssm:       ssm.New(session.Must(awsSession(*debug))),
 		os:        os,
 	}
 	must(e.expandEnviron(*decrypt, *nofail))
 	must(syscall.Exec(path, args[0:], os.Environ()))
 }
 
-func awsSession() (*session.Session, error) {
-	sess := session.Must(session.NewSession())
+func awsSession(debug bool) (*session.Session, error) {
+	config := aws.NewConfig()
+	if debug {
+		config.WithLogLevel(aws.LogDebugWithHTTPBody)
+	}
+	sess := session.Must(session.NewSession(config))
 	if len(aws.StringValue(sess.Config.Region)) == 0 {
+		log.Debug("aws session unable to detect the region, trying to check with ec2 metadata")
 		meta := ec2metadata.New(sess)
 		identity, err := meta.GetInstanceIdentityDocument()
 		if err != nil {
